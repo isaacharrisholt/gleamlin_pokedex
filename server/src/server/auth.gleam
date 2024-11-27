@@ -1,7 +1,9 @@
-import gleam/http.{Post}
+import gleam/http.{Get, Post}
 import gleam/http/request
 import gleam/io
+import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import pevensie/auth
 import server/context.{type Context, Context}
 import server/util
@@ -13,7 +15,7 @@ pub fn auth_handler(req: Request, path: List(String), ctx: Context) -> Response 
   case path, req.method {
     ["user"], Post -> handle_create_user(req, ctx)
     ["login"], Post -> handle_login(req, ctx)
-    ["logout"], Post -> handle_logout(req, ctx)
+    ["logout"], Post | ["logout"], Get -> handle_logout(req, ctx)
     _, _ -> wisp.not_found()
   }
 }
@@ -79,8 +81,14 @@ fn handle_create_user(req: Request, ctx: Context) -> Response {
     ]
       if pass == pass_conf
     -> {
+      let assert Ok(name) = string.split(email, "@") |> list.first
       let user_result =
-        auth.create_user_with_email(ctx.auth, email, pass, context.UserMetadata)
+        auth.create_user_with_email(
+          ctx.auth,
+          email,
+          pass,
+          context.UserMetadata(name:),
+        )
 
       case user_result {
         // TODO: handle error cases better
