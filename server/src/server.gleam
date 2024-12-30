@@ -1,22 +1,25 @@
-import gleam/dynamic
+import formz_lustre/simple
+import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/io
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
-import gleam/result
 import gleam/string_tree
 import lustre/attribute
 import lustre/element
 import lustre/element/html
 import mist
 import pevensie/auth
-import pevensie/drivers/postgres
+import pevensie/cache
+import pevensie/postgres
 import pog
 import server/account
 import server/auth as server_auth
 import server/context.{type Context, Context}
 import server/scaffold.{page_scaffold}
+import server/user
+import server/users
 import server/util
 import wisp.{type Request, type Response}
 import wisp/wisp_mist
@@ -31,6 +34,7 @@ pub fn main() {
       user: "postgres",
     )
   let auth_driver = postgres.new_auth_driver(cfg)
+  let cache_driver = postgres.new_cache_driver(cfg)
   let secret_key_base = wisp.random_string(64)
   let pevensie_cookie_key = "my-super-secret-cookie-string"
 
@@ -43,14 +47,17 @@ pub fn main() {
     auth.new(
       cookie_key: pevensie_cookie_key,
       driver: auth_driver,
-      user_metadata_decoder: context.user_metadata_decoder,
-      user_metadata_encoder: context.user_metadata_encoder,
+      user_metadata_decoder: user.user_metadata_decoder(),
+      user_metadata_encoder: user.user_metadata_encoder,
     )
   let assert Ok(pevensie_auth) =
     pevensie_auth
     |> auth.connect
 
-  let ctx = Context(user: None, auth: pevensie_auth, db:)
+  let pevensie_cache = cache.new(cache_driver)
+  let assert Ok(pevensie_cache) = pevensie_cache |> cache.connect
+
+  let ctx = Context(user: None, auth: pevensie_auth, db:, cache: pevensie_cache)
 
   wisp.configure_logger()
   let assert Ok(_) =
@@ -72,29 +79,26 @@ fn handle_request(req: Request, ctx: Context) -> Response {
     ["login"] -> login(req, ctx)
     ["signup"] -> signup(req, ctx)
     ["auth", ..path] -> server_auth.auth_handler(req, path, ctx)
+    ["user", ..path] -> users.users_handler(req, path, ctx)
     _ -> wisp.not_found()
   }
 }
 
-fn home(req: Request, ctx: Context) -> Response {
-  use ctx <- server_auth.auth_middleware(req, ctx)
-
+fn home(_req: Request, ctx: Context) -> Response {
   let query_result =
     pog.query(
-      "select id::text, user_metadata from pevensie.\"user\" order by user_metadata->'name' desc limit 10",
+      "select id::text, user_metadata from pevensie.\"user\" where deleted_at is null order by user_metadata->'name' desc limit 10",
     )
-    |> pog.returning(fn(data) {
-      io.debug(data)
-      use #(id, metadata_json) <- result.try(dynamic.decode2(
-        fn(id, metadata_json) { #(id, metadata_json) },
-        dynamic.element(0, dynamic.string),
-        dynamic.element(1, dynamic.string),
-      )(data))
-      case json.decode(metadata_json, context.user_metadata_decoder) {
-        Ok(val) -> Ok(#(id, val))
-        Error(json.UnexpectedFormat(errs)) -> Error(errs)
+    |> pog.returning({
+      use id <- decode.field(0, decode.string)
+      use metadata_json <- decode.field(1, decode.string)
+      case json.parse(metadata_json, user.user_metadata_decoder()) {
+        Ok(val) -> decode.success(#(id, val))
         Error(_) ->
-          Error([dynamic.DecodeError("Valid JSON", "Invalid JSON", [""])])
+          decode.failure(
+            #("", user.default_user_metadata("")),
+            "UserMetadataWithId",
+          )
       }
     })
     |> pog.execute(ctx.db)
@@ -141,16 +145,7 @@ fn login(_req: Request, ctx: Context) -> Response {
             html.form(
               [attribute.method("post"), attribute.action("/auth/login")],
               [
-                html.input([
-                  attribute.name("email"),
-                  attribute.type_("email"),
-                  attribute.placeholder("Email"),
-                ]),
-                html.input([
-                  attribute.name("password"),
-                  attribute.type_("password"),
-                  attribute.placeholder("Password"),
-                ]),
+                simple.generate(server_auth.login_form()),
                 html.button([attribute.type_("submit")], [html.text("Log in")]),
               ],
             ),
@@ -176,21 +171,7 @@ fn signup(_req: Request, ctx: Context) -> Response {
             html.form(
               [attribute.method("post"), attribute.action("/auth/user")],
               [
-                html.input([
-                  attribute.name("email"),
-                  attribute.type_("email"),
-                  attribute.placeholder("Email"),
-                ]),
-                html.input([
-                  attribute.name("password"),
-                  attribute.type_("password"),
-                  attribute.placeholder("Password"),
-                ]),
-                html.input([
-                  attribute.name("password_confirmation"),
-                  attribute.type_("password"),
-                  attribute.placeholder("Password confirmation"),
-                ]),
+                simple.generate(server_auth.signup_form()),
                 html.button([attribute.type_("submit")], [html.text("Sign up")]),
               ],
             ),

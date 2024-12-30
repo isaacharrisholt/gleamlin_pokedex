@@ -1,3 +1,6 @@
+import formz
+import formz/field
+import formz_lustre/definitions
 import gleam/http.{Get, Post}
 import gleam/http/request
 import gleam/io
@@ -6,10 +9,11 @@ import gleam/option.{None, Some}
 import gleam/string
 import pevensie/auth
 import server/context.{type Context, Context}
+import server/user
 import server/util
 import wisp.{type Request, type Response}
 
-const session_cookie_name = "gleamlin-pokedex-session"
+pub const session_cookie_name = "gleamlin-pokedex-session"
 
 pub fn auth_handler(req: Request, path: List(String), ctx: Context) -> Response {
   case path, req.method {
@@ -70,24 +74,41 @@ pub fn auth_guard(
   }
 }
 
+pub fn signup_form() {
+  use email <- formz.require(
+    field.field("email") |> field.set_label("Email"),
+    definitions.email_field(),
+  )
+  use password <- formz.require(
+    field.field("password") |> field.set_label("Password"),
+    definitions.password_field(),
+  )
+  use password_confirmation <- formz.require(
+    field.field("password_confirmation")
+      |> field.set_label("Password confirmation"),
+    definitions.password_field(),
+  )
+
+  formz.create_form(#(email, password, password_confirmation))
+}
+
 fn handle_create_user(req: Request, ctx: Context) -> Response {
   use form <- wisp.require_form(req)
 
-  case form.values {
-    [
-      #("email", email),
-      #("password", pass),
-      #("password_confirmation", pass_conf),
-    ]
-      if pass == pass_conf
-    -> {
+  let form_result =
+    signup_form()
+    |> formz.data(form.values)
+    |> formz.parse
+
+  case form_result {
+    Ok(#(email, pass, pass_conf)) if pass == pass_conf -> {
       let assert Ok(name) = string.split(email, "@") |> list.first
       let user_result =
         auth.create_user_with_email(
           ctx.auth,
           email,
           pass,
-          context.UserMetadata(name:),
+          user.default_user_metadata(name),
         )
 
       case user_result {
@@ -127,14 +148,32 @@ fn handle_create_user(req: Request, ctx: Context) -> Response {
   }
 }
 
+pub fn login_form() {
+  use email <- formz.require(
+    field.field("email") |> field.set_label("Email"),
+    definitions.email_field(),
+  )
+  use password <- formz.require(
+    field.field("password") |> field.set_label("Password"),
+    definitions.password_field(),
+  )
+
+  formz.create_form(#(email, password))
+}
+
 fn handle_login(req: Request, ctx: Context) -> Response {
   case ctx.user {
     Some(_) -> wisp.redirect("/account")
     None -> {
       use form <- wisp.require_form(req)
 
-      case form.values {
-        [#("email", email), #("password", pass)] -> {
+      let form_result =
+        login_form()
+        |> formz.data(form.values)
+        |> formz.parse
+
+      case form_result {
+        Ok(#(email, pass)) -> {
           let user_agent =
             request.get_header(req, "user-agent") |> util.result_to_option
           let login_result =
